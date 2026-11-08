@@ -61,6 +61,37 @@ The database is seeded strictly with **2 official accounts** (1 Administrator an
   * **Fulfillment Rules**: Enforces order state flow (`pending` -> `processing` -> `delivered` / `cancelled`) and 4-hour cancellation rule.
   * **Media Storage**: Handles image file uploads and serves them via `/images/products/`.
 
+### 2.3 Laravel Security Architecture (Phases 1 - 4)
+* **Phase 1: 1-Day Session Persistence (1440 Minutes)**
+  * **Database Driver**: Configured `SESSION_DRIVER=database` storing active sessions in the PostgreSQL `sessions` table.
+  * **24-Hour Lifetime**: Set `SESSION_LIFETIME=1440` minutes and `SESSION_EXPIRE_ON_CLOSE=false` in both `.env` and `config/session.php`.
+  * **Token Expiration**: Configured `config/sanctum.php` and `TokenService.php` to 1440 minutes (24 hours).
+* **Phase 2: Route Anti-Spam / Refresh Limiting (10 Hits = 1-Minute Ban)**
+  * **Rate Limiter Bootstrap**: Registered `RateLimiter::for('anti-spam')` in `bootstrap/app.php` tracking client IP (`Limit::perMinute(10)->by($request->ip())`).
+  * **Custom 429 Response**: Returns HTTP 429 with informative error message and `Retry-After` seconds header.
+  * **Route Middleware**: Applied `throttle:anti-spam` to login and registration endpoints.
+* **Phase 3: Login Brute-Force Protection (5 Failed Attempts = 1-Minute Ban)**
+  * **Unique Key**: Tracks attempts using `Str::transliterate($email . '|' . $request->ip())`.
+  * **Pre-Check Lockout**: Verifies `RateLimiter::tooManyAttempts($throttleKey, 5)`. Exceeded attempts return HTTP 429 with remaining seconds from `RateLimiter::availableIn`.
+  * **Failed Verification**: Increments `RateLimiter::hit($throttleKey, 60)` with 1-minute decay and returns HTTP 401 with remaining attempts.
+  * **Success Handler**: Clears counter via `RateLimiter::clear($throttleKey)` and executes `session()->regenerate()` to protect against session fixation.
+* **Phase 4: Session Cleanup & Re-login Handling on Logout**
+  * **Token Revocation**: Nullifies `api_token` in database and revokes active API tokens.
+  * **Guard Flush**: Calls `Auth::guard('web')->logout()` to drop user context from memory.
+  * **Session & CSRF Invalidation**: Calls `session()->invalidate()` and `session()->regenerateToken()`.
+  * **Route Enforcement**: Protected administrative and user routes reject unauthenticated requests with HTTP 401, forcing re-authentication.
+
+### 2.4 Guest Browsing & Mandatory Authentication Policy
+* **First Visit / Guest Mode (No Account Initially)**:
+  * When a visitor arrives at `http://localhost:4200`, they start with **no active account** (guest visitor).
+  * Guests are permitted to browse products, filter categories, search items, and open the Quick View modal to inspect garment specifications, prices, sizing charts, and photography.
+  * Guests **cannot add items to cart** and **cannot place orders**.
+  * Clicking "+ ADD TO BAG", "BUY NOW", or "SECURE CHECKOUT" immediately displays a notice (*"Please log in first to add garments to your bag and place an order."*) and opens the sign-in modal.
+* **Session Deletion & Re-login Handling**:
+  * Active sessions persist for 1 day (1440 minutes) in both the PostgreSQL `sessions` table and the `laravel-session` cookie (`domain=localhost; path=/`).
+  * If the session cookie is deleted in browser DevTools or the session row is deleted in PostgreSQL (`DELETE FROM sessions`), any route change or action immediately returns **HTTP 401 Unauthorized**.
+  * The frontend purges local credentials and kicks the user back to the login screen, requiring a fresh login to regain access.
+
 ---
 
 ## 3. How to Clone and Run (Complete Setup Guide)

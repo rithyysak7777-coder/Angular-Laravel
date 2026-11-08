@@ -84,7 +84,30 @@ npm start
 
 ---
 
-## 4. Primary API Endpoints
+## 4. Laravel Security Architecture (Phases 1 - 4)
+
+1. **Phase 1: 1-Day Session Persistence (1440 Minutes)**
+   - Database Session Driver (`SESSION_DRIVER=database`) persists session records in the PostgreSQL `sessions` table.
+   - Session lifetime is configured to `1440` minutes (24 hours) with `SESSION_EXPIRE_ON_CLOSE=false`.
+   - API tokens & Sanctum expiration set to `1440` minutes (`config/sanctum.php` & `TokenService.php`).
+2. **Phase 2: Route Anti-Spam / Refresh Limiting (10 Hits = 1-Minute Ban)**
+   - Registered `RateLimiter::for('anti-spam')` in `bootstrap/app.php` allowing 10 hits/minute by IP.
+   - Excessive requests receive an HTTP 429 Too Many Requests response with `retry_after_seconds`.
+   - Attached to sensitive authentication endpoints (`throttle:anti-spam`).
+3. **Phase 3: Login Brute-Force Protection (5 Failed Attempts = 1-Minute Ban)**
+   - Tracks failed attempts by email and IP (`RateLimiter::tooManyAttempts($throttleKey, 5)`).
+   - Failed attempts increment hit counter with 60-second decay and return HTTP 401 with remaining attempts.
+   - Exceeding 5 attempts returns an HTTP 429 lockout response with exact remaining seconds countdown.
+   - Successful login clears lockout counter and regenerates session ID to prevent session fixation.
+4. **Phase 4: Session Cleanup & Re-login Handling on Logout**
+   - On logout, clears API token in database (`api_token = null` and token revocation).
+   - Flushes web guard (`Auth::guard('web')->logout()`).
+   - Invalidates session (`$request->session()->invalidate()`) and regenerates CSRF token.
+   - Protected routes (`admin`, `auth.api`) strictly reject unauthenticated access with HTTP 401, requiring fresh login.
+
+---
+
+## 5. Primary API Endpoints
 
 | Resource | Method | Path | Description |
 | :--- | :--- | :--- | :--- |
@@ -108,8 +131,41 @@ npm start
 
 
 
-### 5 . Admin And User 
+### 5. Admin And User Credentials
 
+* **Admin**: `admin@gmail.com` | Password: `password123`
+* **Customer**: `customer@gmail.com` | Password: `password123`
+
+---
+
+## 6. Resolved Key Issues & Behavioral Fixes
+
+1. **Session Persistence, Logout Cleanup & Deletion Re-login Lifecycle**:
+   - **1-Day Session Persistence**: Active sessions and API tokens are configured with a 1440-minute (24-hour / 1-day) lifetime in PostgreSQL (`sessions` table) and `.env`.
+   - **Logout Session Deletion**: When an administrator or user logs out, `POST /api/auth/logout` deletes active sessions from the PostgreSQL `sessions` table, invalidates session cookies, nullifies `users.api_token`, and flushes the authentication guard.
+   - **Strict Session Deletion Handling**: If a session row is deleted from the PostgreSQL `sessions` table or token is revoked/cleared, `AdminMiddleware` and `adminGuard` immediately reject route access with HTTP 401 and redirect to `/admin/login`. Logging in again generates a fresh 1-day session row in the database and restores access.
+   - **Customer Cascade Deletion**: In `UserController::destroy`, cascade deletion cleans up related records (cart items, orders, order items, payments) and permanently deletes the user from PostgreSQL.
+
+2. **Login Error Fix (`Attempt to read property "name" on string`)**:
+   - Safely guarded role resolution across `AuthController.php`, `TokenService.php`, and `User.php`.
+   - Handles `role` whether it is an Eloquent relation object, string, or null.
+
+3. **Cart Persistence & Live Stock Deduction**:
+   - Authentication required: Unauthenticated visitors can only browse and inspect details. Adding to cart (`POST /api/cart`) and ordering (`POST /api/orders`) strictly reject with HTTP 401 until the patron logs in.
+   - In `CartService.ts`, unauthenticated guests start with 0 items; clicking "+ ADD TO BAG" opens the login modal.
+   - When an order is placed, stock is atomically deducted in PostgreSQL (`stock_quantity`) and ordered items are cleared from `cart_items`.
+
+4. **1-Day Session Persistence & Deletion Handling**:
+   - `SESSION_DOMAIN=localhost` configured in `.env` so cookies are visible across all ports (`4200` and `8000`) in Chrome DevTools under `http://localhost:4200`.
+   - If session cookie is deleted in DevTools or session row is deleted in PostgreSQL `sessions` table, `TokenService.php` rejects with HTTP 401, immediately kicking the user back to the login screen.
+   - Logging in again restores a new 1-day session row in PostgreSQL and a fresh session cookie.
+
+5. **DataSeeder Optimization**:
+   - Seeds strictly 2 users (1 Admin: `admin@gmail.com`, 1 Customer: `customer@gmail.com`).
+   - Resets PostgreSQL sequence (`ALTER SEQUENCE users_id_seq RESTART WITH 1`) so Admin is ID 1 and Customer is ID 2.
+   - Zero fake orders and zero cart items seeded; all carts and orders start completely clean (0 records).
+
+Noted : 
 -- Admin : admin@gmail.com , Password : password123
 
 -- Customer : customer@gmail.com , Password : password123
