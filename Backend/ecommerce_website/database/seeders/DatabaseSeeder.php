@@ -39,6 +39,11 @@ class DatabaseSeeder extends Seeder
 
         // Delete all existing users
         $deletedUsersCount = User::query()->delete();
+        if (\Illuminate\Support\Facades\DB::getDriverName() === 'pgsql') {
+            try {
+                \Illuminate\Support\Facades\DB::statement('ALTER SEQUENCE users_id_seq RESTART WITH 1');
+            } catch (\Throwable) {}
+        }
         $this->command->info("  [CLEANUP] Deleted {$deletedUsersCount} old user accounts & cleared all previous orders.");
 
         $this->command->info('─── 2. SEEDING ROLES ───');

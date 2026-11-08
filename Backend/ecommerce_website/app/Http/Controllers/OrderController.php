@@ -2,12 +2,14 @@
 
 namespace App\Http\Controllers;
 
+use App\Models\CartItem;
 use App\Models\Order;
 use App\Models\OrderItem;
 use App\Models\Payment;
 use App\Models\Product;
 use App\Models\User;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\DB;
 
 class OrderController extends Controller
@@ -89,19 +91,17 @@ class OrderController extends Controller
             }
         }
 
-        return DB::transaction(function () use ($validated, $request) {
-            $userId = $validated['user_id'] ?? null;
-            if (!$userId || !User::where('id', $userId)->exists()) {
-                $shippingEmail = $validated['shipping_address']['email'] ?? null;
-                if ($shippingEmail) {
-                    $foundUser = User::where('email', strtolower(trim($shippingEmail)))->first();
-                    $userId = $foundUser?->id;
-                }
-            }
-            if (!$userId || !User::where('id', $userId)->exists()) {
-                $user = User::whereHas('role', fn ($q) => $q->where('name', 'customer'))->first();
-                $userId = $user?->id ?? User::first()?->id ?? 1;
-            }
+        // Authentication check: unauthenticated guests cannot place orders
+        $user = Auth::user() ?? \App\Services\TokenService::resolveUser($request);
+        if (!$user) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Please log in first before placing an order.',
+            ], 401);
+        }
+
+        return DB::transaction(function () use ($validated, $request, $user) {
+            $userId = $user->id;
 
             $orderNumber = $validated['order_number'] ?? ('ORD-' . date('Ym') . '-' . str_pad((string) random_int(1000, 9999), 4, '0', STR_PAD_LEFT));
 
@@ -141,13 +141,15 @@ class OrderController extends Controller
                     'subtotal' => $subtotal,
                 ]);
 
-                // Cut stock out in database
+                // Cut stock out permanently in PostgreSQL database
                 if ($product) {
-                    $currentStock = (int) $product->stock_quantity;
-                    $newStock = max(0, $currentStock - $quantity);
-                    $product->stock_quantity = $newStock;
-                    $product->save();
+                    Product::where('id', $resolvedProductId)->decrement('stock_quantity', $quantity);
                 }
+            }
+
+            // Clear cart items in database for this user now that order is successfully placed
+            if ($userId) {
+                CartItem::where('user_id', $userId)->delete();
             }
 
             if ($request->filled('payment_method')) {

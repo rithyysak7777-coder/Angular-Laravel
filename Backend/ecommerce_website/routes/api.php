@@ -18,13 +18,13 @@ use Illuminate\Support\Facades\Route;
 
 // ── 1. PUBLIC API ROUTES (Catalog Browsing & Checkout) ───────────
 Route::prefix('auth')->group(function () {
-    Route::post('register', [AuthController::class, 'register']);
-    Route::post('login', [AuthController::class, 'login']);
-    Route::post('logout', [AuthController::class, 'logout'])->middleware('auth.api');
+    Route::post('register', [AuthController::class, 'register'])->middleware('throttle:anti-spam');
+    Route::post('login', [AuthController::class, 'login'])->middleware('throttle:anti-spam');
+    Route::post('logout', [AuthController::class, 'logout']);
     Route::get('me', [AuthController::class, 'me'])->middleware('auth.api');
 });
-Route::post('register', [AuthController::class, 'register']);
-Route::post('login', [AuthController::class, 'login']);
+Route::post('register', [AuthController::class, 'register'])->middleware('throttle:anti-spam');
+Route::post('login', [AuthController::class, 'login'])->middleware('throttle:anti-spam');
 
 // Catalog Browsing (Public for Storefront)
 Route::get('products', [ProductController::class, 'index']);

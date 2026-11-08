@@ -21,28 +21,18 @@ class AdminMiddleware
     {
         $user = Auth::user() ?? TokenService::resolveUser($request);
 
-        // If user is not yet resolved, fallback to active administrator
-        if (!$user) {
-            $user = User::with('role')
-                ->whereHas('role', fn ($q) => $q->where('name', 'admin'))
-                ->orWhere('role_id', 1)
-                ->first();
-        }
-
-        if ($user) {
-            Auth::setUser($user);
-        }
-
         if (!$user) {
             if ($request->wantsJson() || $request->is('api/*')) {
                 return response()->json([
                     'success' => false,
-                    'message' => 'Unauthenticated. Please log in first.',
+                    'message' => 'Unauthenticated. Administrator session or token required. Please log in first.',
                 ], 401);
             }
 
             return redirect()->route('login.post')->withErrors(['email' => 'Please log in to continue.']);
         }
+
+        Auth::setUser($user);
 
         // Verify user account is active
         if (!$user->is_active) {

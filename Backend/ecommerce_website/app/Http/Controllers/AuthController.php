@@ -8,7 +8,9 @@ use App\Services\TokenService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Hash;
+use Illuminate\Support\Facades\RateLimiter;
 use Illuminate\Support\Facades\Schema;
+use Illuminate\Support\Str;
 
 class AuthController extends Controller
 {
@@ -57,6 +59,29 @@ class AuthController extends Controller
 
         $user->load('role');
 
+        // Persist authenticated session to database upon registration
+        if ($request->hasSession()) {
+            $request->session()->regenerate();
+            Auth::login($user);
+            $sessionId = $request->session()->getId();
+            $request->session()->save();
+
+            try {
+                if (Schema::hasTable('sessions')) {
+                    \Illuminate\Support\Facades\DB::table('sessions')
+                        ->updateOrInsert(
+                            ['id' => $sessionId],
+                            [
+                                'user_id'       => $user->id,
+                                'ip_address'    => $request->ip(),
+                                'user_agent'    => substr((string) $request->userAgent(), 0, 500),
+                                'last_activity' => time(),
+                            ]
+                        );
+                }
+            } catch (\Throwable) {}
+        }
+
         $token = TokenService::generateToken($user);
 
         return response()->json([
@@ -78,7 +103,7 @@ class AuthController extends Controller
     }
 
     /**
-     * Handle user login.
+     * Handle user login with Brute-Force Rate Limiting (5 attempts = 1-min lockout).
      */
     public function login(Request $request)
     {
@@ -88,6 +113,26 @@ class AuthController extends Controller
         ]);
 
         $email = strtolower(trim($credentials['email']));
+
+        // Phase 3: Construct Unique Throttle Key (email + client IP)
+        $throttleKey = Str::transliterate($email . '|' . $request->ip());
+
+        // Phase 3: Check Current Lockout Status (5 failed attempts = 1-minute ban)
+        if (RateLimiter::tooManyAttempts($throttleKey, 5)) {
+            $seconds = RateLimiter::availableIn($throttleKey);
+            $message = "Too many failed login attempts. Account access is temporarily locked. Please try again in {$seconds} seconds.";
+
+            if ($request->wantsJson() || $request->is('api/*')) {
+                return response()->json([
+                    'success'             => false,
+                    'message'             => $message,
+                    'retry_after_seconds' => $seconds,
+                ], 429);
+            }
+
+            return back()->withErrors(['email' => $message])->onlyInput('email');
+        }
+
         $user = User::with('role')
             ->where(function ($q) use ($email) {
                 $q->where('email', $email);
@@ -103,16 +148,26 @@ class AuthController extends Controller
             })
             ->first();
 
+        // Phase 3: Handle Failed Credential Verification
         if (!$user || !Hash::check($credentials['password'], $user->password_hash)) {
+            RateLimiter::hit($throttleKey, 60); // 1-minute decay (60 seconds)
+            $attempts = RateLimiter::attempts($throttleKey);
+            $remaining = max(0, 5 - $attempts);
+
+            $errorMsg = $remaining > 0
+                ? "Invalid email or password credentials. You have {$remaining} attempt(s) remaining."
+                : "Invalid email or password credentials. Maximum failed attempts reached (5). Access locked for 1 minute.";
+
             if ($request->wantsJson() || $request->is('api/*')) {
                 return response()->json([
-                    'success' => false,
-                    'message' => 'Invalid email or password credentials',
-                    'token'   => null,
+                    'success'            => false,
+                    'message'            => $errorMsg,
+                    'remaining_attempts' => $remaining,
+                    'token'              => null,
                 ], 401);
             }
 
-            return back()->withErrors(['email' => 'Invalid credentials'])->onlyInput('email');
+            return back()->withErrors(['email' => $errorMsg])->onlyInput('email');
         }
 
         if (!$user->is_active) {
@@ -127,13 +182,37 @@ class AuthController extends Controller
             return back()->withErrors(['email' => 'Account is deactivated.']);
         }
 
-        // Generate secure access token
+        // Phase 3: Handle Successful Login -> Clear lockout counter
+        RateLimiter::clear($throttleKey);
+
+        // Safeguard against session fixation and persist authenticated session to database
+        if ($request->hasSession()) {
+            $request->session()->regenerate();
+            Auth::login($user);
+            $sessionId = $request->session()->getId();
+            $request->session()->save();
+
+            try {
+                if (Schema::hasTable('sessions')) {
+                    \Illuminate\Support\Facades\DB::table('sessions')
+                        ->updateOrInsert(
+                            ['id' => $sessionId],
+                            [
+                                'user_id'       => $user->id,
+                                'ip_address'    => $request->ip(),
+                                'user_agent'    => substr((string) $request->userAgent(), 0, 500),
+                                'last_activity' => time(),
+                            ]
+                        );
+                }
+            } catch (\Throwable) {}
+        }
+
+        // Generate secure access token (1440 minutes / 24 hours validity)
         $token = TokenService::generateToken($user);
 
-        // Support session login if session web driver is used
+        // Support web session redirect if form submission
         if (!$request->is('api/*') && !$request->wantsJson()) {
-            Auth::login($user);
-            $request->session()->regenerate();
             return redirect()->intended('/')->with('success', 'Welcome back!');
         }
 
@@ -155,26 +234,43 @@ class AuthController extends Controller
     }
 
     /**
-     * Handle user logout.
+     * Handle user logout (Phase 4: Session cleanup, token revocation, guard flush).
      */
     public function logout(Request $request)
     {
         $user = Auth::user() ?? TokenService::resolveUser($request);
+
+        // Phase 4: Revoke API Tokens and delete sessions from database on logout
         if ($user) {
             try {
                 if (Schema::hasTable('users') && Schema::hasColumn('users', 'api_token')) {
                     $user->update(['api_token' => null]);
+                }
+                if (method_exists($user, 'tokens')) {
+                    $user->tokens()->delete();
+                }
+                if (Schema::hasTable('sessions')) {
+                    \Illuminate\Support\Facades\DB::table('sessions')->where('user_id', $user->id)->delete();
                 }
             } catch (\Throwable) {
                 // Ignore
             }
         }
 
+        // Phase 4: Flush the Web Guard (drop user context from memory)
+        Auth::guard('web')->logout();
         if (Auth::check()) {
             Auth::logout();
         }
 
+        // Phase 4: Invalidate Session and Regenerate CSRF Token
         if ($request->hasSession()) {
+            $sessionId = $request->session()->getId();
+            try {
+                if (Schema::hasTable('sessions')) {
+                    \Illuminate\Support\Facades\DB::table('sessions')->where('id', $sessionId)->delete();
+                }
+            } catch (\Throwable) {}
             $request->session()->invalidate();
             $request->session()->regenerateToken();
         }
@@ -182,7 +278,7 @@ class AuthController extends Controller
         if ($request->wantsJson() || $request->is('api/*')) {
             return response()->json([
                 'success' => true,
-                'message' => 'Logged out successfully',
+                'message' => 'Logged out successfully. Session invalidated and tokens revoked.',
             ]);
         }
 

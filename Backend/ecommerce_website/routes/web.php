@@ -13,9 +13,9 @@ Route::get('/', function () {
     return view('welcome');
 });
 
-// Authentication Web Routes
-Route::post('register', [AuthController::class, 'register'])->name('register.post');
-Route::post('login', [AuthController::class, 'login'])->name('login.post');
+// Authentication Web Routes (with anti-spam refresh limiting)
+Route::post('register', [AuthController::class, 'register'])->middleware('throttle:anti-spam')->name('register.post');
+Route::post('login', [AuthController::class, 'login'])->middleware('throttle:anti-spam')->name('login.post');
 Route::post('logout', [AuthController::class, 'logout'])->name('logout');
 
 // Custom Search Routes

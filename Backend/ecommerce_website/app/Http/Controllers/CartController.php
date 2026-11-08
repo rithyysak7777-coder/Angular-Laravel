@@ -14,12 +14,23 @@ class CartController extends Controller
      */
     public function index(Request $request)
     {
-        $userId = Auth::id() ?? (int) ($request->header('X-User-Id') ?? $request->get('user_id', 2));
+        $requestedUserId = $request->get('user_id') ?? $request->header('X-User-Id');
+        $resolvedUser = null;
+        if (Auth::check()) {
+            $resolvedUser = Auth::user();
+        } elseif ($requestedUserId && \App\Models\User::where('id', $requestedUserId)->exists()) {
+            $resolvedUser = \App\Models\User::find($requestedUserId);
+        } else {
+            $resolvedUser = null;
+        }
+        $userId = $resolvedUser?->id;
 
-        $items = CartItem::with(['product.primaryImage', 'product.category'])
-            ->where('user_id', $userId)
-            ->orderBy('id', 'asc')
-            ->get();
+        $items = $userId
+            ? CartItem::with(['product.primaryImage', 'product.category'])
+                ->where('user_id', $userId)
+                ->orderBy('id', 'asc')
+                ->get()
+            : collect();
 
         $totalAmount = $items->sum('subtotal');
         $totalItems = $items->sum('qty');
@@ -63,8 +74,16 @@ class CartController extends Controller
             'qty'           => 'nullable|integer|min:1',
         ]);
 
-        $defaultUser = \App\Models\User::first();
-        $userId = Auth::id() ?? (int) ($validated['user_id'] ?? $request->header('X-User-Id') ?? $defaultUser?->id ?? 1);
+        // Authentication check: unauthenticated guests cannot add to bag or order
+        $resolvedUser = Auth::user() ?? \App\Services\TokenService::resolveUser($request);
+        if (!$resolvedUser) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Please log in first to add garments to your bag and place an order.',
+            ], 401);
+        }
+        $userId = $resolvedUser->id;
+
         $size = strtoupper(trim($validated['selected_size'] ?? 'L'));
         $qty = (int) ($validated['qty'] ?? 1);
 
@@ -186,9 +205,13 @@ class CartController extends Controller
      */
     public function clear(Request $request)
     {
-        $userId = Auth::id() ?? (int) ($request->header('X-User-Id') ?? $request->get('user_id', 2));
+        $userId = Auth::id() ?? $request->header('X-User-Id') ?? $request->get('user_id');
 
-        CartItem::where('user_id', $userId)->delete();
+        if ($userId) {
+            CartItem::where('user_id', $userId)->delete();
+        } else {
+            CartItem::query()->delete();
+        }
 
         if ($request->wantsJson() || $request->is('api/*')) {
             return response()->json([

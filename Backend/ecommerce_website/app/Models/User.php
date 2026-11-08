@@ -141,7 +141,8 @@ class User extends Authenticatable
     public function getRoleNameAttribute(): string
     {
         $role = $this->relationLoaded('role') ? $this->getRelation('role') : $this->role()->first();
-        return strtolower($role?->name ?? ($this->role_id === 1 ? 'admin' : 'customer'));
+        $name = is_object($role) ? ($role->name ?? null) : (is_string($role) ? $role : null);
+        return strtolower($name ?? ($this->role_id === 1 ? 'admin' : 'customer'));
     }
 
     /**
